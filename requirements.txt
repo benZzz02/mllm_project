@@ -1,0 +1,5 @@
+# LLaMA-Factory provides torch, transformers, peft and the Qwen3-VL runtime.
+# These packages are needed by the local conversion/evaluation utilities.
+Pillow>=10.0
+numpy>=1.24
+transformers>=4.57.0

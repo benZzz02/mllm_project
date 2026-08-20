@@ -1,0 +1,55 @@
+### model
+model_name_or_path: Qwen/Qwen3-VL-2B-Instruct
+trust_remote_code: true
+image_max_pixels: 262144
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+freeze_vision_tower: true
+freeze_multi_modal_projector: false
+freeze_language_model: false
+
+### dataset
+dataset_dir: data/generated
+dataset: dgm4_sft_train
+eval_dataset: dgm4_val
+template: qwen3_vl_nothink
+enable_thinking: false
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: outputs/sft_lora
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+plot_loss: true
+overwrite_output_dir: false
+report_to: tensorboard
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+per_device_eval_batch_size: 2
+learning_rate: 2.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 180000000
+ddp_find_unused_parameters: false
+eval_strategy: steps
+save_strategy: steps
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+

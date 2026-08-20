@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+data/generated/
+outputs/
+predictions/
+results/*.json
+results/*.jsonl
+!results/experiments.tsv
+

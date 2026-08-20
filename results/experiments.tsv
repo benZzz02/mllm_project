@@ -1,0 +1,6 @@
+run_id	status	model	training	train_source	preference_source	seed	binary_auc	binary_acc	binary_eer	multilabel_map	image_mean_iou	text_token_f1	json_valid_rate	badcase_rate	notes
+base	planned	Qwen3-VL-2B-Instruct	none	none	none	42									zero-shot baseline
+sft	planned	Qwen3-VL-2B-Instruct	LoRA SFT	dgm4_sft_train	none	42									main supervised baseline
+base_dpo	planned	Qwen3-VL-2B-Instruct	LoRA DPO	none	dgm4_base_badcase_preference	42									direct-RL ablation
+sft_dpo	planned	Qwen3-VL-2B-Instruct	LoRA SFT then DPO	dgm4_sft_train	dgm4_badcase_preference	42									primary RL route
+sft_simpo	planned	Qwen3-VL-2B-Instruct	LoRA SFT then SimPO	dgm4_sft_train	dgm4_badcase_preference	42									lightweight preference comparison
