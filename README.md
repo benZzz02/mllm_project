@@ -160,6 +160,7 @@ DATA_DIR=/data/nfs_data/mllm_project/generated \
 ADAPTER=outputs/sft_lora \
 NAME=sft \
 GPU_IDS=0,1,2 \
+BATCH_SIZE=2 \
 SPLITS="val test" \
 bash scripts/run_parallel_eval.sh
 ```
@@ -171,6 +172,8 @@ bash scripts/run_parallel_eval.sh
 - 合并 `predictions/shards/` 下的分片预测为 `predictions/sft_val.jsonl` 和 `predictions/sft_test.jsonl`。
 - 自动调用 `evaluate_dgm4_predictions.py`，输出 `results/sft_val_metrics.json` 和 `results/sft_test_metrics.json`。
 - 使用 `--resume` 跳过已经完成的分片 id，方便中断后续跑。
+
+`BATCH_SIZE` 是每个 GPU 推理进程的 batch。建议从 `2` 开始试；如果显存还有余量再尝试 `4`。如果出现 OOM，改回 `BATCH_SIZE=1` 后用默认续跑即可。
 
 DPO 或 SimPO 评估只需要改 adapter 和名字：
 

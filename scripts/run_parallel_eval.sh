@@ -21,6 +21,7 @@ ATTN="${ATTN:-sdpa}"
 DTYPE="${DTYPE:-auto}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-192}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 BERT_TOKENIZER="${BERT_TOKENIZER:-bert-base-uncased}"
 PREDICTION_DIR="${PREDICTION_DIR:-predictions}"
 RESULT_DIR="${RESULT_DIR:-results}"
@@ -109,6 +110,7 @@ run_split() {
         --device-map "$DEVICE_MAP"
         --dtype "$DTYPE"
         --max-new-tokens "$MAX_NEW_TOKENS"
+        --batch-size "$BATCH_SIZE"
       )
       if [[ -n "$ADAPTER" ]]; then
         cmd+=(--adapter "$ADAPTER")
@@ -175,6 +177,7 @@ echo "  NAME=${NAME}"
 echo "  MODEL=${MODEL}"
 echo "  GPU_IDS=${GPU_IDS}"
 echo "  SPLITS=${SPLITS}"
+echo "  BATCH_SIZE=${BATCH_SIZE}"
 echo "  RESUME=${RESUME}"
 
 for split in $SPLITS; do

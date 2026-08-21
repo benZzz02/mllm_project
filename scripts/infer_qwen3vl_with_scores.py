@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="Qwen/Qwen3-VL-2B-Instruct")
     parser.add_argument("--adapter", type=Path, default=None, help="LLaMA-Factory LoRA output; omit for Base")
     parser.add_argument("--max-new-tokens", type=int, default=192)
+    parser.add_argument("--batch-size", type=int, default=1, help="Per-process inference batch size")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
     parser.add_argument("--attn-implementation", default=None, help="For example flash_attention_2 or sdpa")
@@ -63,9 +64,11 @@ def apply_template(processor: Any, messages: list[dict[str, Any]]) -> str:
         return processor.apply_chat_template(messages, **kwargs)
 
 
-def prepare_inputs(processor: Any, image: Any, prompt: str, device: Any) -> Any:
-    rendered = apply_template(processor, chat_messages(image, prompt))
-    batch = processor(text=[rendered], images=[image], padding=True, return_tensors="pt")
+def prepare_inputs(processor: Any, images: list[Any], prompts: list[str], device: Any) -> Any:
+    if len(images) != len(prompts):
+        raise ValueError(f"images/prompts length mismatch: {len(images)} vs {len(prompts)}")
+    rendered = [apply_template(processor, chat_messages(image, prompt)) for image, prompt in zip(images, prompts)]
+    batch = processor(text=rendered, images=images, padding=True, return_tensors="pt")
     return batch.to(device)
 
 
@@ -84,6 +87,13 @@ def append_candidate_to_inputs(inputs: Any, candidate_ids: Any) -> tuple[dict[st
 
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
+    batch_size = input_ids.shape[0]
+    if candidate_ids.shape[0] == 1 and batch_size > 1:
+        candidate_ids = candidate_ids.expand(batch_size, -1)
+    elif candidate_ids.shape[0] != batch_size:
+        raise ValueError(
+            f"candidate batch size must be 1 or match input batch size: {candidate_ids.shape[0]} vs {batch_size}"
+        )
     sequence_length = input_ids.shape[1]
     candidate_length = candidate_ids.shape[1]
 
@@ -108,7 +118,7 @@ def append_candidate_to_inputs(inputs: Any, candidate_ids: Any) -> tuple[dict[st
     return full_inputs, labels
 
 
-def candidate_mean_logprob(model: Any, processor: Any, inputs: Any, candidate: str) -> float:
+def candidate_mean_logprobs(model: Any, processor: Any, inputs: Any, candidate: str) -> list[float]:
     import torch
 
     candidate_ids = processor.tokenizer(candidate, add_special_tokens=False, return_tensors="pt").input_ids
@@ -118,8 +128,17 @@ def candidate_mean_logprob(model: Any, processor: Any, inputs: Any, candidate: s
 
     full_inputs, labels = append_candidate_to_inputs(inputs, candidate_ids)
     with torch.inference_mode():
-        output = model(**full_inputs, labels=labels, use_cache=False)
-    return -float(output.loss.detach().float().item())
+        output = model(**full_inputs, use_cache=False)
+        logits = output.logits.detach().float()
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+        mask = shift_labels.ne(-100)
+        safe_labels = shift_labels.masked_fill(~mask, 0)
+        token_logprobs = torch.log_softmax(shift_logits, dim=-1).gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+        token_logprobs = token_logprobs * mask
+        counts = mask.sum(dim=1).clamp_min(1)
+        mean_logprobs = token_logprobs.sum(dim=1) / counts
+    return [float(value.item()) for value in mean_logprobs]
 
 
 def normalized_candidate_score(
@@ -128,13 +147,16 @@ def normalized_candidate_score(
     inputs: Any,
     negative: str,
     positive: str,
-) -> float:
-    negative_logprob = candidate_mean_logprob(model, processor, inputs, negative)
-    positive_logprob = candidate_mean_logprob(model, processor, inputs, positive)
-    maximum = max(negative_logprob, positive_logprob)
-    negative_exp = math.exp(negative_logprob - maximum)
-    positive_exp = math.exp(positive_logprob - maximum)
-    return positive_exp / (negative_exp + positive_exp)
+) -> list[float]:
+    negative_logprobs = candidate_mean_logprobs(model, processor, inputs, negative)
+    positive_logprobs = candidate_mean_logprobs(model, processor, inputs, positive)
+    scores = []
+    for negative_logprob, positive_logprob in zip(negative_logprobs, positive_logprobs):
+        maximum = max(negative_logprob, positive_logprob)
+        negative_exp = math.exp(negative_logprob - maximum)
+        positive_exp = math.exp(positive_logprob - maximum)
+        scores.append(positive_exp / (negative_exp + positive_exp))
+    return scores
 
 
 def classification_prompt(caption: str) -> str:
@@ -159,7 +181,7 @@ def type_prompt(caption: str, type_name: str) -> str:
     )
 
 
-def generate_response(model: Any, processor: Any, inputs: Any, max_new_tokens: int) -> str:
+def generate_responses(model: Any, processor: Any, inputs: Any, max_new_tokens: int) -> list[str]:
     import torch
 
     with torch.inference_mode():
@@ -170,7 +192,16 @@ def generate_response(model: Any, processor: Any, inputs: Any, max_new_tokens: i
             use_cache=True,
         )
     continuation = generated[:, inputs["input_ids"].shape[1] :]
-    return processor.batch_decode(continuation, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+    return [
+        response.strip()
+        for response in processor.batch_decode(
+            continuation, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+    ]
+
+
+def batched(items: list[tuple[int, dict[str, Any]]], batch_size: int) -> list[list[tuple[int, dict[str, Any]]]]:
+    return [items[start : start + batch_size] for start in range(0, len(items), batch_size)]
 
 
 def load_runtime(args: argparse.Namespace) -> tuple[Any, Any]:
@@ -189,12 +220,15 @@ def load_runtime(args: argparse.Namespace) -> tuple[Any, Any]:
         model = PeftModel.from_pretrained(model, str(args.adapter))
     model.eval()
     processor = AutoProcessor.from_pretrained(args.model)
+    processor.tokenizer.padding_side = "left"
     return model, processor
 
 
 def main() -> None:
     args = parse_args()
     suppress_known_transformers_noise()
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be positive")
     rows = load_records(args.dataset)
     if args.limit is not None:
         if args.limit <= 0:
@@ -218,46 +252,60 @@ def main() -> None:
             flush=True,
         )
 
+    pending_items = [(index, row) for index, row in enumerate(rows, start=1) if str(row["id"]) not in completed_ids]
+    skipped_count = len(rows) - len(pending_items)
+    if skipped_count:
+        print(f"Skipping {skipped_count} completed rows", file=sys.stderr, flush=True)
+
     mode = "a" if args.resume and args.output.exists() else "w"
     with args.output.open(mode, encoding="utf-8") as handle:
         written = existing_count
-        for index, row in enumerate(rows, start=1):
+        for batch_items in batched(pending_items, args.batch_size):
             from PIL import Image
 
-            if str(row["id"]) in completed_ids:
-                print(f"[{index}/{len(rows)}] {row['id']} skipped", file=sys.stderr, flush=True)
-                continue
+            indexes = [item[0] for item in batch_items]
+            batch_rows = [item[1] for item in batch_items]
+            images = []
+            for row in batch_rows:
+                image_path = Path(row["images"][0])
+                with Image.open(image_path) as opened:
+                    images.append(opened.convert("RGB"))
 
-            image_path = Path(row["images"][0])
-            with Image.open(image_path) as opened:
-                image = opened.convert("RGB")
-                generation_prompt = strip_image_token(row["conversations"][0]["value"])
-                generation_inputs = prepare_inputs(processor, image, generation_prompt, device)
-                response = generate_response(model, processor, generation_inputs, args.max_new_tokens)
+            generation_prompts = [strip_image_token(row["conversations"][0]["value"]) for row in batch_rows]
+            generation_inputs = prepare_inputs(processor, images, generation_prompts, device)
+            responses = generate_responses(model, processor, generation_inputs, args.max_new_tokens)
 
-                caption = row["meta"]["normalized_text"]
-                binary_inputs = prepare_inputs(processor, image, classification_prompt(caption), device)
-                manipulated_score = normalized_candidate_score(
-                    model, processor, binary_inputs, "pristine", "manipulated"
+            captions = [row["meta"]["normalized_text"] for row in batch_rows]
+            binary_inputs = prepare_inputs(processor, images, [classification_prompt(caption) for caption in captions], device)
+            manipulated_scores = normalized_candidate_score(
+                model, processor, binary_inputs, "pristine", "manipulated"
+            )
+
+            per_row_type_scores: list[dict[str, float]] = [{} for _ in batch_rows]
+            for type_name in TYPE_ORDER:
+                scoring_inputs = prepare_inputs(
+                    processor, images, [type_prompt(caption, type_name) for caption in captions], device
                 )
-                type_scores = {}
-                for type_name in TYPE_ORDER:
-                    scoring_inputs = prepare_inputs(processor, image, type_prompt(caption, type_name), device)
-                    type_scores[type_name] = normalized_candidate_score(model, processor, scoring_inputs, "no", "yes")
+                scores = normalized_candidate_score(model, processor, scoring_inputs, "no", "yes")
+                for output_index, score in enumerate(scores):
+                    per_row_type_scores[output_index][type_name] = score
 
-            prediction = {
-                "id": row["id"],
-                "response": response,
-                "manipulated_score": manipulated_score,
-                "type_scores": type_scores,
-                "score_method": "length_normalized_sequence_likelihood",
-                "model": args.model,
-                "adapter": str(args.adapter) if args.adapter else None,
-            }
-            handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
+            for index, row, response, manipulated_score, type_scores in zip(
+                indexes, batch_rows, responses, manipulated_scores, per_row_type_scores
+            ):
+                prediction = {
+                    "id": row["id"],
+                    "response": response,
+                    "manipulated_score": manipulated_score,
+                    "type_scores": type_scores,
+                    "score_method": "length_normalized_sequence_likelihood",
+                    "model": args.model,
+                    "adapter": str(args.adapter) if args.adapter else None,
+                }
+                handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
+                written += 1
+                print(f"[{index}/{len(rows)}] {row['id']}", file=sys.stderr, flush=True)
             handle.flush()
-            written += 1
-            print(f"[{index}/{len(rows)}] {row['id']}", file=sys.stderr, flush=True)
 
     print(json.dumps({"written": written, "output": str(args.output)}, ensure_ascii=False))
 
