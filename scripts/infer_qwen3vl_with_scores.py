@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from dgm4_pipeline.io_utils import load_records, write_jsonl
+from dgm4_pipeline.io_utils import load_records
 from dgm4_pipeline.schema import TYPE_ORDER
 
 
@@ -67,6 +67,35 @@ def prepare_inputs(processor: Any, image: Any, prompt: str, device: Any) -> Any:
     return batch.to(device)
 
 
+def append_candidate_to_inputs(inputs: Any, candidate_ids: Any) -> tuple[dict[str, Any], Any]:
+    import torch
+
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+    sequence_length = input_ids.shape[1]
+    candidate_length = candidate_ids.shape[1]
+
+    full_inputs: dict[str, Any] = {}
+    for key, value in dict(inputs).items():
+        if key == "input_ids":
+            full_inputs[key] = torch.cat((input_ids, candidate_ids), dim=1)
+        elif key == "attention_mask":
+            extra_attention = torch.ones_like(candidate_ids, dtype=attention_mask.dtype)
+            full_inputs[key] = torch.cat((attention_mask, extra_attention), dim=1)
+        elif torch.is_tensor(value) and value.ndim >= 2 and value.shape[0] == input_ids.shape[0] and value.shape[1] == sequence_length:
+            # Qwen3-VL processors may return token-type tensors with the same
+            # sequence length as input_ids. Candidate text tokens must extend
+            # those fields too, otherwise RoPE indexing sees mismatched shapes.
+            repeat_shape = [1, candidate_length] + [1] * (value.ndim - 2)
+            full_inputs[key] = torch.cat((value, value[:, -1:].repeat(*repeat_shape)), dim=1)
+        else:
+            full_inputs[key] = value
+
+    labels = torch.full_like(full_inputs["input_ids"], -100)
+    labels[:, -candidate_length:] = candidate_ids
+    return full_inputs, labels
+
+
 def candidate_mean_logprob(model: Any, processor: Any, inputs: Any, candidate: str) -> float:
     import torch
 
@@ -75,12 +104,7 @@ def candidate_mean_logprob(model: Any, processor: Any, inputs: Any, candidate: s
     if candidate_ids.shape[1] == 0:
         raise ValueError(f"Candidate tokenized to an empty sequence: {candidate!r}")
 
-    full_inputs = dict(inputs)
-    full_inputs["input_ids"] = torch.cat((inputs["input_ids"], candidate_ids), dim=1)
-    extra_attention = torch.ones_like(candidate_ids, dtype=inputs["attention_mask"].dtype)
-    full_inputs["attention_mask"] = torch.cat((inputs["attention_mask"], extra_attention), dim=1)
-    labels = torch.full_like(full_inputs["input_ids"], -100)
-    labels[:, -candidate_ids.shape[1] :] = candidate_ids
+    full_inputs, labels = append_candidate_to_inputs(inputs, candidate_ids)
     with torch.inference_mode():
         output = model(**full_inputs, labels=labels, use_cache=False)
     return -float(output.loss.detach().float().item())
@@ -168,29 +192,30 @@ def main() -> None:
 
     model, processor = load_runtime(args)
     device = model.device
-    predictions = []
-    for index, row in enumerate(rows, start=1):
-        from PIL import Image
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("w", encoding="utf-8") as handle:
+        written = 0
+        for index, row in enumerate(rows, start=1):
+            from PIL import Image
 
-        image_path = Path(row["images"][0])
-        with Image.open(image_path) as opened:
-            image = opened.convert("RGB")
-            generation_prompt = strip_image_token(row["conversations"][0]["value"])
-            generation_inputs = prepare_inputs(processor, image, generation_prompt, device)
-            response = generate_response(model, processor, generation_inputs, args.max_new_tokens)
+            image_path = Path(row["images"][0])
+            with Image.open(image_path) as opened:
+                image = opened.convert("RGB")
+                generation_prompt = strip_image_token(row["conversations"][0]["value"])
+                generation_inputs = prepare_inputs(processor, image, generation_prompt, device)
+                response = generate_response(model, processor, generation_inputs, args.max_new_tokens)
 
-            caption = row["meta"]["normalized_text"]
-            binary_inputs = prepare_inputs(processor, image, classification_prompt(caption), device)
-            manipulated_score = normalized_candidate_score(
-                model, processor, binary_inputs, "pristine", "manipulated"
-            )
-            type_scores = {}
-            for type_name in TYPE_ORDER:
-                scoring_inputs = prepare_inputs(processor, image, type_prompt(caption, type_name), device)
-                type_scores[type_name] = normalized_candidate_score(model, processor, scoring_inputs, "no", "yes")
+                caption = row["meta"]["normalized_text"]
+                binary_inputs = prepare_inputs(processor, image, classification_prompt(caption), device)
+                manipulated_score = normalized_candidate_score(
+                    model, processor, binary_inputs, "pristine", "manipulated"
+                )
+                type_scores = {}
+                for type_name in TYPE_ORDER:
+                    scoring_inputs = prepare_inputs(processor, image, type_prompt(caption, type_name), device)
+                    type_scores[type_name] = normalized_candidate_score(model, processor, scoring_inputs, "no", "yes")
 
-        predictions.append(
-            {
+            prediction = {
                 "id": row["id"],
                 "response": response,
                 "manipulated_score": manipulated_score,
@@ -199,11 +224,12 @@ def main() -> None:
                 "model": args.model,
                 "adapter": str(args.adapter) if args.adapter else None,
             }
-        )
-        print(f"[{index}/{len(rows)}] {row['id']}", file=sys.stderr, flush=True)
+            handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            written += 1
+            print(f"[{index}/{len(rows)}] {row['id']}", file=sys.stderr, flush=True)
 
-    write_jsonl(args.output, predictions)
-    print(json.dumps({"written": len(predictions), "output": str(args.output)}, ensure_ascii=False))
+    print(json.dumps({"written": written, "output": str(args.output)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
