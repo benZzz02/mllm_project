@@ -151,9 +151,43 @@ python scripts/compare_runs.py \
 
 脚本同时报告绝对增量和相对错误下降。面试或简历主表优先写绝对增量，badcase reduction 可作为闭环效果补充。
 
-## 7. 测试集纪律
+### 三卡并行评估 val/test
 
-先在 val 上选择最终方案和阈值，锁定配置后只对该方案跑一次 `dgm4_test.jsonl`：
+完整验证集和测试集推理较慢，因为每条样本需要生成结构化 JSON，并额外计算真假和四类篡改的候选似然分数。推荐按 GPU 分片并行跑：
+
+```bash
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+ADAPTER=outputs/sft_lora \
+NAME=sft \
+GPU_IDS=0,1,2 \
+SPLITS="val test" \
+bash scripts/run_parallel_eval.sh
+```
+
+脚本会执行：
+
+- 将 `dgm4_val.jsonl` 和 `dgm4_test.jsonl` 分别按行均匀切成 3 片。
+- 每张卡启动一个 `infer_qwen3vl_with_scores.py` 进程。
+- 合并 `predictions/shards/` 下的分片预测为 `predictions/sft_val.jsonl` 和 `predictions/sft_test.jsonl`。
+- 自动调用 `evaluate_dgm4_predictions.py`，输出 `results/sft_val_metrics.json` 和 `results/sft_test_metrics.json`。
+- 使用 `--resume` 跳过已经完成的分片 id，方便中断后续跑。
+
+DPO 或 SimPO 评估只需要改 adapter 和名字：
+
+```bash
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+ADAPTER=outputs/sft_dpo_lora \
+NAME=sft_dpo \
+GPU_IDS=0,1,2 \
+SPLITS="val test" \
+bash scripts/run_parallel_eval.sh
+```
+
+## 7. 测试集使用
+
+可以对 SFT、DPO、SimPO 等阶段同时报告 val/test，观察验证集提升是否能泛化到测试集；但模型选择、阈值选择、prompt 修改和训练策略调整只看 val。test 结果用于同步观测和最终汇报，不反向参与调参。
+
+单独评估最终方案的 test 命令如下：
 
 ```bash
 python scripts/infer_qwen3vl_with_scores.py \
