@@ -141,13 +141,18 @@ def candidate_mean_logprobs(model: Any, processor: Any, inputs: Any, candidate: 
     full_inputs, labels = append_candidate_to_inputs(inputs, candidate_ids)
     with torch.inference_mode():
         output = model(**full_inputs, use_cache=False)
-        logits = output.logits.detach().float()
-        shift_logits = logits[:, :-1, :]
+        shift_logits = output.logits[:, :-1, :]
         shift_labels = labels[:, 1:]
         mask = shift_labels.ne(-100)
-        safe_labels = shift_labels.masked_fill(~mask, 0)
-        token_logprobs = torch.log_softmax(shift_logits, dim=-1).gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-        token_logprobs = token_logprobs * mask
+        selected_logits = shift_logits[mask].float()
+        selected_labels = shift_labels[mask]
+        selected_logprobs = (
+            torch.log_softmax(selected_logits, dim=-1)
+            .gather(-1, selected_labels.unsqueeze(-1))
+            .squeeze(-1)
+        )
+        token_logprobs = torch.zeros_like(shift_labels, dtype=torch.float32)
+        token_logprobs[mask] = selected_logprobs
         counts = mask.sum(dim=1).clamp_min(1)
         mean_logprobs = token_logprobs.sum(dim=1) / counts
     return [float(value.item()) for value in mean_logprobs]
