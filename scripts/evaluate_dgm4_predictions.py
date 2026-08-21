@@ -185,6 +185,10 @@ def confusion_metrics(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
     }
 
 
+def percent(value: float) -> float:
+    return value * 100.0
+
+
 def expand_word_positions(tokenizer: Any, text: str, positions: Iterable[int]) -> tuple[set[int], int]:
     encoding = tokenizer(text, max_length=128, truncation=True, add_special_tokens=True)
     word_ids = encoding.word_ids()
@@ -384,10 +388,38 @@ def main() -> None:
             "tokenizer": args.bert_tokenizer,
             "max_length": 128,
         }
+    official_text_metrics = text_grounding.get("official_bert_token_level", word_metrics)
+    official_text_source = "bert_subword" if bert_tokenizer is not None else "word_level_fallback"
+
+    official_metrics_percent = {
+        "AUC_cls": percent(binary["auc"]),
+        "ACC_cls": percent(binary["accuracy"]),
+        "EER_cls": percent(binary["eer"]),
+        "MAP": percent(multilabel["map"]),
+        "OP": percent(multilabel["op"]),
+        "OR": percent(multilabel["or"]),
+        "OF1": percent(multilabel["of1"]),
+        "CP": percent(multilabel["cp"]),
+        "CR": percent(multilabel["cr"]),
+        "CF1": percent(multilabel["cf1"]),
+        "F1_FS": percent(multilabel["per_class_f1"]["face_swap"]),
+        "F1_FA": percent(multilabel["per_class_f1"]["face_attribute"]),
+        "F1_TS": percent(multilabel["per_class_f1"]["text_swap"]),
+        "F1_TA": percent(multilabel["per_class_f1"]["text_attribute"]),
+        "IOU_score": percent(sum(image_ious) / len(image_ious)),
+        "IOU_ACC_50": percent(sum(value > 0.5 for value in image_ious) / len(image_ious)),
+        "IOU_ACC_75": percent(sum(value > 0.75 for value in image_ious) / len(image_ious)),
+        "IOU_ACC_95": percent(sum(value > 0.95 for value in image_ious) / len(image_ious)),
+        "ACC_tok": percent(official_text_metrics["accuracy"]),
+        "Precision_tok": percent(official_text_metrics["precision"]),
+        "Recall_tok": percent(official_text_metrics["recall"]),
+        "F1_tok": percent(official_text_metrics["f1"]),
+    }
 
     metrics = {
         "num_samples": len(ground_truth),
         "json_valid_rate": valid_count / len(ground_truth),
+        "official_metrics_percent": official_metrics_percent,
         "structured_output": {
             "verdict_accuracy": structured_verdict_correct / len(ground_truth),
             "types_exact_match": structured_types_exact / len(ground_truth),
@@ -416,6 +448,10 @@ def main() -> None:
             "structured_output": "Generated JSON verdict/type quality is reported separately from score-based official classification metrics.",
             "fallback": "Without sidecar scores, AUC/mAP are computed from discrete generated decisions and must be labeled as fallback.",
             "text": "Pass --bert-tokenizer bert-base-uncased to reproduce HAMMER's word-to-BERT-subword token metric.",
+            "official_metrics_percent": {
+                "names": "Uses the same metric names and percent scale as official DGM4/HAMMER test.py.",
+                "text_source": official_text_source,
+            },
         },
     }
     write_json(args.output, metrics)
