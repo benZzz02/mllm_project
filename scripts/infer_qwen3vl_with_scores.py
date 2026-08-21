@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
     parser.add_argument("--attn-implementation", default=None, help="For example flash_attention_2 or sdpa")
     parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--resume", action="store_true", help="Append to an existing output file and skip completed ids")
     return parser.parse_args()
 
 
@@ -65,6 +67,16 @@ def prepare_inputs(processor: Any, image: Any, prompt: str, device: Any) -> Any:
     rendered = apply_template(processor, chat_messages(image, prompt))
     batch = processor(text=[rendered], images=[image], padding=True, return_tensors="pt")
     return batch.to(device)
+
+
+class KnownProcessorWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Kwargs passed to `processor.__call__` have to be in `processor_kwargs`" not in record.getMessage()
+
+
+def suppress_known_transformers_noise() -> None:
+    warning_filter = KnownProcessorWarningFilter()
+    logging.getLogger("transformers").addFilter(warning_filter)
 
 
 def append_candidate_to_inputs(inputs: Any, candidate_ids: Any) -> tuple[dict[str, Any], Any]:
@@ -182,6 +194,7 @@ def load_runtime(args: argparse.Namespace) -> tuple[Any, Any]:
 
 def main() -> None:
     args = parse_args()
+    suppress_known_transformers_noise()
     rows = load_records(args.dataset)
     if args.limit is not None:
         if args.limit <= 0:
@@ -193,10 +206,27 @@ def main() -> None:
     model, processor = load_runtime(args)
     device = model.device
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8") as handle:
-        written = 0
+    completed_ids: set[str] = set()
+    existing_count = 0
+    if args.resume and args.output.exists():
+        existing_rows = load_records(args.output)
+        completed_ids = {str(row["id"]) for row in existing_rows if "id" in row}
+        existing_count = len(existing_rows)
+        print(
+            f"Resuming from {args.output}: {existing_count} existing rows, {len(completed_ids)} unique ids",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    mode = "a" if args.resume and args.output.exists() else "w"
+    with args.output.open(mode, encoding="utf-8") as handle:
+        written = existing_count
         for index, row in enumerate(rows, start=1):
             from PIL import Image
+
+            if str(row["id"]) in completed_ids:
+                print(f"[{index}/{len(rows)}] {row['id']} skipped", file=sys.stderr, flush=True)
+                continue
 
             image_path = Path(row["images"][0])
             with Image.open(image_path) as opened:
