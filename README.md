@@ -1,8 +1,8 @@
 # DGM4 × Qwen3-VL 后训练项目
 
-这是一套可直接执行的项目代码，目标是把 DGM4 模拟成多模态内容审核流：正常图文作为常规样本，四类篡改作为业务 badcase；先用 LoRA SFT 学任务协议，再用 DPO 或 SimPO 针对模型在 badcase 上的错误做偏好优化。
+这是一套可直接执行的项目代码，目标是把 DGM4 模拟成多模态内容审核流：正常图文作为常规样本，四类篡改作为业务 badcase；先用 LoRA SFT 学任务协议，再用 Badcase-Aware GRPO reward 强化结论、类型和证据定位，DPO/SimPO 作为离线偏好优化对照。
 
-训练统一使用 LLaMA-Factory。自定义脚本只负责数据转换、Qwen3-VL 推理打分、官方指标评估和 badcase 回流，不引入第二套训练框架。
+SFT、DPO 和 SimPO 统一使用 LLaMA-Factory。自定义脚本负责数据转换、Qwen3-VL 推理打分、官方指标评估、badcase 回流和 GRPO reward 计算；如实际跑 GRPO，可将 `dgm4_pipeline.grpo_reward` 接入 TRL/EasyR1-style GRPO trainer。
 
 ## 目录
 
@@ -12,6 +12,7 @@ dgm4_pipeline/              数据协议、输出解析和错误归因公共代�
 scripts/convert_*.py        DGM4 -> 多模态 ShareGPT
 scripts/infer_*.py          生成 JSON，并计算 AUC/mAP 所需连续分数
 scripts/build_*.py          从官方 train 内部池挖 chosen/rejected
+scripts/score_grpo_*.py     离线检查 Badcase-Aware GRPO reward
 scripts/evaluate_*.py       DGM4 官方指标 + 工程 badcase 指标
 results/experiments.tsv     只填真实实验结果的实验台账
 tests/                      不依赖真实 DGM4/模型的合成烟测
@@ -107,9 +108,42 @@ llamafactory-cli train configs/dpo_lora.yaml
 llamafactory-cli train configs/simpo_lora.yaml
 ```
 
-DPO 是主实验；SimPO 用来验证无 reference preference loss 的效果；Base -> DPO 回答“是否必须先 SFT”的面试追问。三条路线使用各自训练池输出构造的偏好数据，均不接触 val/test。
+DPO 和 SimPO 是离线偏好优化对照；Base -> DPO 回答“是否必须先 SFT”的面试追问。三条路线使用各自训练池输出构造的偏好数据，均不接触 val/test。
 
-## 6. 验证集评估
+## 6. Badcase-Aware GRPO reward
+
+GRPO 主设计使用一个简单可解释的规则奖励：
+
+```text
+R = W_case * (0.5 * R_verdict + 0.25 * R_type + 0.25 * R_evidence) - R_penalty
+```
+
+- `R_verdict`：normal/manipulated 判断正确得分，漏判 manipulated 重点扣分。
+- `R_type`：FS/FA/TS/TA 多标签 F1。
+- `R_evidence`：图像篡改看 bbox IoU，文本篡改看 text token F1，图文混合取平均。
+- `W_case`：按训练集 case 频率计算，低频 badcase 权重大，高频 normal 权重低，并截断到 `[0.6, 2.0]` 防止过补偿。
+- `R_penalty`：惩罚全判风险、类型全选、bbox 全图、text evidence 整段全选等投机行为。
+
+离线检查 reward：
+
+```bash
+python scripts/score_grpo_rewards.py \
+  --ground-truth data/generated/dgm4_preference_pool.jsonl \
+  --responses predictions/sft_preference_pool.jsonl \
+  --weights-from data/generated/dgm4_sft_train.jsonl \
+  --output results/sft_preference_pool_grpo_rewards.jsonl \
+  --summary-output results/sft_preference_pool_grpo_rewards.json
+```
+
+真实 GRPO trainer 可直接调用：
+
+```python
+from dgm4_pipeline.grpo_reward import make_badcase_aware_reward
+
+reward_func = make_badcase_aware_reward(case_weights=case_weights)
+```
+
+## 7. 验证集评估
 
 以 SFT 为例：
 
@@ -186,7 +220,7 @@ SPLITS="val test" \
 bash scripts/run_parallel_eval.sh
 ```
 
-## 7. 测试集使用
+## 8. 测试集使用
 
 可以对 SFT、DPO、SimPO 等阶段同时报告 val/test，观察验证集提升是否能泛化到测试集；但模型选择、阈值选择、prompt 修改和训练策略调整只看 val。test 结果用于同步观测和最终汇报，不反向参与调参。
 
@@ -208,7 +242,7 @@ python scripts/evaluate_dgm4_predictions.py \
 
 不要提前填写 `results/experiments.tsv`。训练完成后记录真实指标、seed、checkpoint、数据 manifest 和改动说明。
 
-## 8. 烟测
+## 9. 烟测
 
 烟测会临时生成小图片和仿 DGM4 标注，验证转换、泄漏保护、偏好挖掘和完美预测指标，不下载数据或模型：
 
