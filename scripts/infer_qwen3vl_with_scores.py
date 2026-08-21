@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 from dgm4_pipeline.io_utils import load_records
 from dgm4_pipeline.schema import TYPE_ORDER
@@ -79,7 +82,16 @@ class KnownProcessorWarningFilter(logging.Filter):
 
 def suppress_known_transformers_noise() -> None:
     warning_filter = KnownProcessorWarningFilter()
+    logging.getLogger("transformers").setLevel(logging.ERROR)
     logging.getLogger("transformers").addFilter(warning_filter)
+    for handler in logging.getLogger("transformers").handlers + logging.getLogger().handlers:
+        handler.addFilter(warning_filter)
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+    except Exception:
+        pass
 
 
 def append_candidate_to_inputs(inputs: Any, candidate_ids: Any) -> tuple[dict[str, Any], Any]:
