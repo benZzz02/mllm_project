@@ -75,6 +75,19 @@ class GrpoRewardTest(unittest.TestCase):
         self.assertEqual(len(scores), 1)
         self.assertAlmostEqual(scores[0], 1.0)
 
+    def test_reward_function_repeats_targets_for_grouped_generations(self) -> None:
+        target = {"verdict": "pristine", "types": [], "image_bbox": None, "text_positions": []}
+        reward = make_badcase_aware_reward()
+        scores = reward(
+            completions=[
+                [{"role": "assistant", "content": canonical_answer(target)}],
+                [{"role": "assistant", "content": canonical_answer(target)}],
+            ],
+            target=[target],
+        )
+        self.assertEqual(len(scores), 2)
+        self.assertEqual(scores, [1.0, 1.0])
+
 
 if __name__ == "__main__":
     unittest.main()

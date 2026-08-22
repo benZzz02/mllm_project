@@ -21,7 +21,7 @@ RESPONSE_KEYS = ("response", "predict", "prediction", "generated_text", "output"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build multimodal DPO/SimPO pairs from train-pool badcases.")
+    parser = argparse.ArgumentParser(description="Build multimodal DPO/RM pairs from train-pool badcases.")
     parser.add_argument("--pool", type=Path, required=True, help="dgm4_preference_pool.jsonl")
     parser.add_argument("--predictions", type=Path, required=True, help="Model outputs as JSON/JSONL")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data" / "generated" / "dgm4_badcase_preference.jsonl")

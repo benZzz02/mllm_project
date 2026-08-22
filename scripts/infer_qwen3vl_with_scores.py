@@ -32,7 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="Qwen/Qwen3-VL-2B-Instruct")
-    parser.add_argument("--adapter", type=Path, default=None, help="LLaMA-Factory LoRA output; omit for Base")
+    parser.add_argument(
+        "--adapter",
+        default=None,
+        help="LLaMA-Factory LoRA output; comma-separate multiple adapters such as outputs/sft_lora,outputs/sft_dpo_lora",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--batch-size", type=int, default=1, help="Per-process inference batch size")
     parser.add_argument(
@@ -55,6 +59,12 @@ def parse_args() -> argparse.Namespace:
 
 def strip_image_token(prompt: str) -> str:
     return prompt.replace("<image>\n", "", 1).replace("<image>", "", 1).lstrip()
+
+
+def adapter_paths(raw: str | None) -> list[Path]:
+    if not raw:
+        return []
+    return [Path(item.strip()) for item in str(raw).split(",") if item.strip()]
 
 
 def chat_messages(image: Any, prompt: str) -> list[dict[str, Any]]:
@@ -241,10 +251,14 @@ def load_runtime(args: argparse.Namespace) -> tuple[Any, Any]:
     if args.attn_implementation:
         load_kwargs["attn_implementation"] = args.attn_implementation
     model = Qwen3VLForConditionalGeneration.from_pretrained(args.model, **load_kwargs)
-    if args.adapter:
+    adapters = adapter_paths(args.adapter)
+    if adapters:
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, str(args.adapter))
+        for index, adapter in enumerate(adapters):
+            model = PeftModel.from_pretrained(model, str(adapter))
+            if index < len(adapters) - 1:
+                model = model.merge_and_unload()
     model.eval()
     processor = AutoProcessor.from_pretrained(args.model)
     processor.tokenizer.padding_side = "left"

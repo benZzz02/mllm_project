@@ -4,7 +4,7 @@ METADATA_DIR ?= /path/to/DGM4/metadata
 IMAGE_ROOT ?= /path/to/datasets
 DATA_DIR ?= data/generated
 
-.PHONY: data test sft infer-base-pool infer-sft-pool mine-base-prefs mine-sft-prefs base-dpo dpo simpo
+.PHONY: data test sft infer-base-pool infer-sft-pool mine-base-prefs mine-sft-prefs base-dpo dpo ppo grpo simpo
 
 data:
 	$(PYTHON) scripts/convert_dgm4_to_sharegpt.py --metadata-dir $(METADATA_DIR) --image-root $(IMAGE_ROOT) --output-dir $(DATA_DIR)
@@ -31,8 +31,13 @@ base-dpo:
 	$(LLAMAFACTORY) train configs/base_dpo_lora.yaml
 
 dpo:
-	$(LLAMAFACTORY) train configs/dpo_lora.yaml
+	bash scripts/run_dpo.sh
 
 simpo:
 	$(LLAMAFACTORY) train configs/simpo_lora.yaml
 
+ppo:
+	bash scripts/run_ppo.sh
+
+grpo:
+	bash scripts/run_grpo.sh

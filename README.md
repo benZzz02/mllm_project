@@ -1,17 +1,20 @@
 # DGM4 × Qwen3-VL 后训练项目
 
-这是一套可直接执行的项目代码，目标是把 DGM4 模拟成多模态内容审核流：正常图文作为常规样本，四类篡改作为业务 badcase；先用 LoRA SFT 学任务协议，再用 Badcase-Aware GRPO reward 强化结论、类型和证据定位，DPO/SimPO 作为离线偏好优化对照。
+这是一套可直接执行的项目代码，目标是把 DGM4 模拟成多模态内容审核流：正常图文作为常规样本，四类篡改作为业务 badcase；先用 LoRA SFT 学任务协议，再用 DPO、PPO、Badcase-Aware GRPO 三条代表性 RL 路线强化结论、类型和证据定位。
 
-SFT、DPO 和 SimPO 统一使用 LLaMA-Factory。自定义脚本负责数据转换、Qwen3-VL 推理打分、官方指标评估、badcase 回流和 GRPO reward 计算；如实际跑 GRPO，可将 `dgm4_pipeline.grpo_reward` 接入 TRL/EasyR1-style GRPO trainer。
+SFT、DPO、RM 和 PPO 使用 LLaMA-Factory。GRPO 使用 TRL 的 VLM GRPOTrainer 接入自定义规则 reward。自定义脚本负责数据转换、Qwen3-VL 推理打分、官方指标评估、badcase 回流和 RL 数据准备。
 
 ## 目录
 
 ```text
-configs/                    LLaMA-Factory 的 SFT、DPO、SimPO 和直接 DPO 配置
+configs/                    LLaMA-Factory 的 SFT、DPO、RM、PPO 和消融配置
 dgm4_pipeline/              数据协议、输出解析和错误归因公共代码
 scripts/convert_*.py        DGM4 -> 多模态 ShareGPT
 scripts/infer_*.py          生成 JSON，并计算 AUC/mAP 所需连续分数
 scripts/build_*.py          从官方 train 内部池挖 chosen/rejected
+scripts/run_dpo.sh          SFT -> DPO 一键训练
+scripts/run_ppo.sh          SFT -> RM -> PPO 一键训练
+scripts/run_grpo.sh         SFT -> Badcase-Aware GRPO 一键训练
 scripts/score_grpo_*.py     离线检查 Badcase-Aware GRPO reward
 scripts/evaluate_*.py       DGM4 官方指标 + 工程 badcase 指标
 results/experiments.tsv     只填真实实验结果的实验台账
@@ -26,7 +29,11 @@ tests/                      不依赖真实 DGM4/模型的合成烟测
 pip install -r requirements.txt
 ```
 
-Qwen3-VL 支持需要较新的 Transformers；若 LLaMA-Factory 当前版本指定了 Transformers 提交或版本，以它的依赖约束为准。
+Qwen3-VL 支持需要较新的 Transformers；若 LLaMA-Factory 当前版本指定了 Transformers 提交或版本，以它的依赖约束为准。GRPO 脚本额外需要 TRL 的 VLM GRPOTrainer；如果训练环境缺包，再装：
+
+```bash
+pip install "trl[peft]" accelerate datasets
+```
 
 ## 2. 转换 DGM4
 
@@ -79,7 +86,7 @@ python scripts/build_preference_pairs.py \
   --output data/generated/dgm4_base_badcase_preference.jsonl
 ```
 
-### SFT 后的 DPO/SimPO 数据
+### SFT 后的 DPO/PPO 数据
 
 ```bash
 python scripts/infer_qwen3vl_with_scores.py \
@@ -95,20 +102,39 @@ python scripts/build_preference_pairs.py \
 
 默认仅挖“篡改样本上的模型错误”。需要同时控制正常样本误报时，加 `--include-pristine-errors`。每条偏好数据中，`chosen` 是标注生成的规范 JSON，`rejected` 是模型原始错误输出；空输出、格式错误、判定错误、类型错误和定位错误都会进入错误标签。
 
-## 5. 偏好优化
+## 5. DPO / PPO / GRPO 三条 RL 路线
 
 ```bash
-# 消融：Base -> DPO
-llamafactory-cli train configs/base_dpo_lora.yaml
+# SFT -> DPO：离线偏好优化，chosen=GT规范JSON，rejected=SFT错误输出
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+SFT_ADAPTER=outputs/sft_lora \
+OUTPUT_DIR=outputs/sft_dpo_lora \
+GPU_IDS=0,1,2 \
+bash scripts/run_dpo.sh
 
-# 主方案：SFT -> DPO
-llamafactory-cli train configs/dpo_lora.yaml
+# SFT -> RM -> PPO：先训奖励模型，再在线采样并按RM分数更新策略
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+SFT_ADAPTER=outputs/sft_lora \
+RM_OUTPUT=outputs/reward_lora \
+PPO_OUTPUT=outputs/sft_ppo_lora \
+GPU_IDS=0,1,2 \
+bash scripts/run_ppo.sh
 
-# 代表性对比：SFT -> SimPO
-llamafactory-cli train configs/simpo_lora.yaml
+# SFT -> GRPO：每个prompt生成多条回答，用规则reward做组内相对优化
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+SFT_ADAPTER=outputs/sft_lora \
+OUTPUT_DIR=outputs/sft_grpo_lora \
+GPU_IDS=0,1,2 \
+NUM_GENERATIONS=2 \
+MAX_SAMPLES=2000 \
+bash scripts/run_grpo.sh
 ```
 
-DPO 和 SimPO 是离线偏好优化对照；Base -> DPO 回答“是否必须先 SFT”的面试追问。三条路线使用各自训练池输出构造的偏好数据，均不接触 val/test。
+DPO 和 PPO 脚本都会优先复用已有的 `dgm4_badcase_preference.jsonl`。如果偏好对不存在，会先在 official train 的 `preference_pool` 上用 SFT 模型挖错，再构造 chosen/rejected。`MAX_PAIRS` 默认 5000，可按显存和时间调整。
+
+PPO 多一步 RM：RM 是 reward model，训练目标是给 chosen 更高分、rejected 更低分；PPO 阶段模型在线生成回答，由 RM 打分后更新策略。GRPO 不训练单独 RM，而是直接调用 `dgm4_pipeline.grpo_reward` 的规则 reward。
+
+`configs/simpo_lora.yaml` 保留为可选补充，不作为主线。`configs/base_dpo_lora.yaml` 是消融，用来回答“是否可以不经过 SFT 直接 DPO”的追问。
 
 ## 6. Badcase-Aware GRPO reward
 
@@ -135,13 +161,19 @@ python scripts/score_grpo_rewards.py \
   --summary-output results/sft_preference_pool_grpo_rewards.json
 ```
 
-真实 GRPO trainer 可直接调用：
+真实 GRPO 训练脚本已经接入 TRL：
 
-```python
-from dgm4_pipeline.grpo_reward import make_badcase_aware_reward
-
-reward_func = make_badcase_aware_reward(case_weights=case_weights)
+```bash
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+SFT_ADAPTER=outputs/sft_lora \
+OUTPUT_DIR=outputs/sft_grpo_lora \
+GPU_IDS=0,1,2 \
+NUM_GENERATIONS=2 \
+MAX_SAMPLES=2000 \
+bash scripts/run_grpo.sh
 ```
+
+`MAX_SAMPLES=2000` 是先验省时设置；正式跑全量时改为 `MAX_SAMPLES=0`。如果安装了带 VLM 支持的较新 TRL，也可以加 `USE_VLLM=1` 尝试加速生成。
 
 ## 7. 验证集评估
 
@@ -161,7 +193,7 @@ python scripts/evaluate_dgm4_predictions.py \
   --bert-tokenizer bert-base-uncased
 ```
 
-将 `--adapter` 分别改为 `outputs/base_dpo_lora`、`outputs/sft_dpo_lora`、`outputs/sft_simpo_lora` 即可比较。评估器输出：
+如果 DPO/PPO 使用 `create_new_adapter: true`，评估时需要叠加加载 SFT adapter 和 RL adapter；GRPO 脚本默认直接续训 SFT adapter，评估时加载 GRPO 输出即可。评估器输出：
 
 - 官方真假指标：AUC、ACC、EER。
 - 官方四族多标签指标：mAP、OP/OR/OF1、CP/CR/CF1、各类 AP/F1。
@@ -232,12 +264,30 @@ bash scripts/run_parallel_eval.sh
 
 这里不是少评估样本，也不是少生成结构化回答；快评模式只是跳过额外的候选似然打分。badcase 分析、JSON 合法率、verdict accuracy、types exact match、IoU、Text F1 和错误标签仍然可以看。最终要写官方连续 AUC/mAP 表格时，使用默认 `SCORE_MODE=full`。
 
-DPO 或 SimPO 评估只需要改 adapter 和名字：
+DPO、PPO、GRPO 评估只需要改 adapter 和名字：
 
 ```bash
 DATA_DIR=/data/nfs_data/mllm_project/generated \
-ADAPTER=outputs/sft_dpo_lora \
+ADAPTER=outputs/sft_lora,outputs/sft_dpo_lora \
 NAME=sft_dpo \
+GPU_IDS=0,1,2 \
+SPLITS="val test" \
+bash scripts/run_parallel_eval.sh
+```
+
+```bash
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+ADAPTER=outputs/sft_lora,outputs/sft_ppo_lora \
+NAME=sft_ppo \
+GPU_IDS=0,1,2 \
+SPLITS="val test" \
+bash scripts/run_parallel_eval.sh
+```
+
+```bash
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+ADAPTER=outputs/sft_grpo_lora \
+NAME=sft_grpo \
 GPU_IDS=0,1,2 \
 SPLITS="val test" \
 bash scripts/run_parallel_eval.sh
@@ -245,14 +295,14 @@ bash scripts/run_parallel_eval.sh
 
 ## 8. 测试集使用
 
-可以对 SFT、DPO、SimPO 等阶段同时报告 val/test，观察验证集提升是否能泛化到测试集；但模型选择、阈值选择、prompt 修改和训练策略调整只看 val。test 结果用于同步观测和最终汇报，不反向参与调参。
+可以对 SFT、DPO、PPO、GRPO 等阶段同时报告 val/test，观察验证集提升是否能泛化到测试集；但模型选择、阈值选择、prompt 修改和训练策略调整只看 val。test 结果用于同步观测和最终汇报，不反向参与调参。
 
 单独评估最终方案的 test 命令如下：
 
 ```bash
 python scripts/infer_qwen3vl_with_scores.py \
   --dataset data/generated/dgm4_test.jsonl \
-  --adapter outputs/sft_dpo_lora \
+  --adapter outputs/sft_lora,outputs/sft_dpo_lora \
   --output predictions/final_test.jsonl
 
 python scripts/evaluate_dgm4_predictions.py \

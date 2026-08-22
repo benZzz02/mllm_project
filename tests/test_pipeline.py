@@ -119,6 +119,22 @@ class PipelineIntegrationTest(unittest.TestCase):
             report = json.loads(preference_output.with_suffix(".report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["badcase_count_before_cap"], manipulated_pool_count)
 
+            ppo_output = output_dir / "dgm4_ppo_train.jsonl"
+            self.run_script(
+                "scripts/prepare_ppo_prompts.py",
+                "--source",
+                str(output_dir / "dgm4_preference_pool.jsonl"),
+                "--output",
+                str(ppo_output),
+                "--dataset-info",
+                str(output_dir / "dataset_info.json"),
+            )
+            ppo_rows = load_records(ppo_output)
+            self.assertEqual(len(ppo_rows), len(pool))
+            self.assertTrue(all(len(row["conversations"]) == 1 for row in ppo_rows))
+            dataset_info = json.loads((output_dir / "dataset_info.json").read_text(encoding="utf-8"))
+            self.assertEqual(dataset_info["dgm4_ppo_train"]["file_name"], "dgm4_ppo_train.jsonl")
+
             perfect_predictions = root / "perfect_val.jsonl"
             prediction_rows = []
             for row in validation:

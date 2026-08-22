@@ -1,11 +1,13 @@
-### model: continue from the SFT adapter
+### ppo policy: continue from the SFT adapter and use the trained reward model
 model_name_or_path: Qwen/Qwen3-VL-2B-Instruct
 adapter_name_or_path: outputs/sft_lora
+reward_model: outputs/reward_lora
+reward_model_type: lora
 trust_remote_code: true
 image_max_pixels: 262144
 
 ### method
-stage: dpo
+stage: ppo
 do_train: true
 finetuning_type: lora
 create_new_adapter: true
@@ -13,13 +15,14 @@ lora_target: all
 lora_rank: 64
 lora_alpha: 128
 lora_dropout: 0.05
-pref_loss: sigmoid
-pref_beta: 0.1
-pref_ftx: 0.1
+ppo_buffer_size: 4
+ppo_epochs: 4
+ppo_score_norm: true
+ppo_whiten_rewards: true
 
 ### dataset
 dataset_dir: data/generated
-dataset: dgm4_badcase_preference
+dataset: dgm4_ppo_train
 template: qwen3_vl_nothink
 enable_thinking: false
 cutoff_len: 2048
@@ -27,8 +30,14 @@ overwrite_cache: true
 preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
+### generation
+max_new_tokens: 192
+top_p: 0.9
+top_k: 0
+temperature: 0.7
+
 ### output
-output_dir: outputs/sft_dpo_lora
+output_dir: outputs/sft_ppo_lora
 logging_steps: 10
 save_steps: 250
 plot_loss: true
@@ -37,8 +46,8 @@ report_to: tensorboard
 
 ### train
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
-learning_rate: 5.0e-6
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-6
 num_train_epochs: 1.0
 lr_scheduler_type: cosine
 warmup_ratio: 0.03

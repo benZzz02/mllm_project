@@ -215,7 +215,11 @@ def _targets_from_kwargs(kwargs: dict[str, Any], count: int) -> list[dict[str, A
     if isinstance(raw_targets, dict):
         raw_targets = [raw_targets] * count
     if len(raw_targets) != count:
-        raise ValueError(f"target count does not match completions: {len(raw_targets)} vs {count}")
+        if raw_targets and count % len(raw_targets) == 0:
+            repeats = count // len(raw_targets)
+            raw_targets = [target for target in raw_targets for _ in range(repeats)]
+        else:
+            raise ValueError(f"target count does not match completions: {len(raw_targets)} vs {count}")
     return list(raw_targets)
 
 
