@@ -209,6 +209,29 @@ bash scripts/run_parallel_eval.sh
 
 `BATCH_SIZE` 是每个 GPU 推理进程的 batch。建议从 `2` 开始试；如果显存还有余量再尝试 `4`。如果出现 OOM，改回 `BATCH_SIZE=1` 后用默认续跑即可。
 
+如果只是快速看验证/测试趋势，可以跳过额外的候选似然打分：
+
+```bash
+DATA_DIR=/data/nfs_data/mllm_project/generated \
+ADAPTER=outputs/sft_lora \
+NAME=sft_fast \
+GPU_IDS=0,1,2 \
+BATCH_SIZE=2 \
+SCORE_MODE=generated \
+SPLITS="val test" \
+bash scripts/run_parallel_eval.sh
+```
+
+`SCORE_MODE` 有三档：
+
+| 模式 | 会生成 JSON | 连续真假 AUC/EER | 连续类型 mAP | 适合用途 |
+| --- | --- | --- | --- | --- |
+| `generated` | 是 | 否，离散 fallback | 否，离散 fallback | 快速看 JSON、漏判、类型错误、IoU/Text F1、badcase 分布 |
+| `binary` | 是 | 是 | 否，离散 fallback | 快速比较风险检出能力和漏判率 |
+| `full` | 是 | 是 | 是 | 最终官方指标表和简历/面试结果 |
+
+这里不是少评估样本，也不是少生成结构化回答；快评模式只是跳过额外的候选似然打分。badcase 分析、JSON 合法率、verdict accuracy、types exact match、IoU、Text F1 和错误标签仍然可以看。最终要写官方连续 AUC/mAP 表格时，使用默认 `SCORE_MODE=full`。
+
 DPO 或 SimPO 评估只需要改 adapter 和名字：
 
 ```bash

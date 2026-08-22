@@ -35,6 +35,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", type=Path, default=None, help="LLaMA-Factory LoRA output; omit for Base")
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--batch-size", type=int, default=1, help="Per-process inference batch size")
+    parser.add_argument(
+        "--score-mode",
+        choices=("full", "binary", "generated"),
+        default="full",
+        help=(
+            "full: generate plus continuous binary/type likelihood scores; "
+            "binary: generate plus continuous binary score only; "
+            "generated: generate JSON only and let evaluation use discrete fallback scores"
+        ),
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dtype", choices=("auto", "bfloat16", "float16", "float32"), default="auto")
     parser.add_argument("--attn-implementation", default=None, help="For example flash_attention_2 or sdpa")
@@ -293,19 +303,25 @@ def main() -> None:
             responses = generate_responses(model, processor, generation_inputs, args.max_new_tokens)
 
             captions = [row["meta"]["normalized_text"] for row in batch_rows]
-            binary_inputs = prepare_inputs(processor, images, [classification_prompt(caption) for caption in captions], device)
-            manipulated_scores = normalized_candidate_score(
-                model, processor, binary_inputs, "pristine", "manipulated"
-            )
-
-            per_row_type_scores: list[dict[str, float]] = [{} for _ in batch_rows]
-            for type_name in TYPE_ORDER:
-                scoring_inputs = prepare_inputs(
-                    processor, images, [type_prompt(caption, type_name) for caption in captions], device
+            manipulated_scores: list[float | None] = [None for _ in batch_rows]
+            per_row_type_scores: list[dict[str, float] | None] = [None for _ in batch_rows]
+            if args.score_mode in ("full", "binary"):
+                binary_inputs = prepare_inputs(
+                    processor, images, [classification_prompt(caption) for caption in captions], device
                 )
-                scores = normalized_candidate_score(model, processor, scoring_inputs, "no", "yes")
-                for output_index, score in enumerate(scores):
-                    per_row_type_scores[output_index][type_name] = score
+                manipulated_scores = normalized_candidate_score(
+                    model, processor, binary_inputs, "pristine", "manipulated"
+                )
+
+            if args.score_mode == "full":
+                per_row_type_scores = [{} for _ in batch_rows]
+                for type_name in TYPE_ORDER:
+                    scoring_inputs = prepare_inputs(
+                        processor, images, [type_prompt(caption, type_name) for caption in captions], device
+                    )
+                    scores = normalized_candidate_score(model, processor, scoring_inputs, "no", "yes")
+                    for output_index, score in enumerate(scores):
+                        per_row_type_scores[output_index][type_name] = score
 
             for index, row, response, manipulated_score, type_scores in zip(
                 indexes, batch_rows, responses, manipulated_scores, per_row_type_scores
@@ -313,12 +329,18 @@ def main() -> None:
                 prediction = {
                     "id": row["id"],
                     "response": response,
-                    "manipulated_score": manipulated_score,
-                    "type_scores": type_scores,
-                    "score_method": "length_normalized_sequence_likelihood",
+                    "score_method": {
+                        "full": "length_normalized_sequence_likelihood",
+                        "binary": "binary_only_length_normalized_sequence_likelihood",
+                        "generated": "generated_json_discrete_fallback",
+                    }[args.score_mode],
                     "model": args.model,
                     "adapter": str(args.adapter) if args.adapter else None,
                 }
+                if manipulated_score is not None:
+                    prediction["manipulated_score"] = manipulated_score
+                if type_scores is not None:
+                    prediction["type_scores"] = type_scores
                 handle.write(json.dumps(prediction, ensure_ascii=False, separators=(",", ":")) + "\n")
                 written += 1
                 print(f"[{index}/{len(rows)}] {row['id']}", file=sys.stderr, flush=True)

@@ -22,6 +22,7 @@ DTYPE="${DTYPE:-auto}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-192}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
+SCORE_MODE="${SCORE_MODE:-full}"
 BERT_TOKENIZER="${BERT_TOKENIZER:-bert-base-uncased}"
 PREDICTION_DIR="${PREDICTION_DIR:-predictions}"
 RESULT_DIR="${RESULT_DIR:-results}"
@@ -116,6 +117,7 @@ run_split() {
         --dtype "$DTYPE"
         --max-new-tokens "$MAX_NEW_TOKENS"
         --batch-size "$BATCH_SIZE"
+        --score-mode "$SCORE_MODE"
       )
       if [[ -n "$ADAPTER" ]]; then
         cmd+=(--adapter "$ADAPTER")
@@ -183,6 +185,7 @@ echo "  MODEL=${MODEL}"
 echo "  GPU_IDS=${GPU_IDS}"
 echo "  SPLITS=${SPLITS}"
 echo "  BATCH_SIZE=${BATCH_SIZE}"
+echo "  SCORE_MODE=${SCORE_MODE}"
 echo "  RESUME=${RESUME}"
 
 for split in $SPLITS; do
